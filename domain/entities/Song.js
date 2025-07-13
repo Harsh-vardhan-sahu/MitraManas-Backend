@@ -1,5 +1,3 @@
-
-
 class Song{
     constructor({id,title,artist,link,image}){
     this.id=id;
