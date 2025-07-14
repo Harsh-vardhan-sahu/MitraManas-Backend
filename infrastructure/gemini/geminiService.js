@@ -2,33 +2,51 @@ require("dotenv").config();
 const axios = require("axios");
 const QuotesRepository = require("../../application/interfaces/QuotesRepository");
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+// ✅ List of all API keys
+const GEMINI_KEYS = process.env.GEMINI_KEYS.split(",");
+const MODEL = "gemini-2.5-flash";
 
-async function safeGenerateContent(prompt, retryCount = 0) {
+// 🔁 Auto-rotate keys on quota failure (403/429)
+async function safeGenerateContent(prompt, keyIndex = 0, retryCount = 0) {
+  if (keyIndex >= GEMINI_KEYS.length) {
+    throw new Error("❌ All Gemini API keys have been exhausted.");
+  }
+
+  const apiKey = GEMINI_KEYS[keyIndex];
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
+
   try {
-    const response = await axios.post(GEMINI_URL, {
-      contents: [{
-        role: "user",
-        parts: [{ text: prompt }]
-      }]
+    const response = await axios.post(url, {
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
     });
 
-    const candidates = response.data.candidates;
-    const text = candidates?.[0]?.content?.parts?.[0]?.text;
+    const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    return text?.replace(/```json|```/g, "").trim();
+    if (!text) throw new Error("Empty response from Gemini");
+
+    return text.replace(/```json|```/g, "").trim();
   } catch (err) {
-    if ((retryCount < 3) && (err.response?.status === 429 || err.response?.status === 503)) {
-      console.warn(`⚠️ Gemini API busy. Retrying after 15 seconds... Attempt ${retryCount + 1}`);
-      await new Promise(res => setTimeout(res, 15000));
-      return safeGenerateContent(prompt, retryCount + 1);
+    const status = err.response?.status;
+
+    // 🔁 Rotate to next key if quota/rate limit hit
+    if ((status === 429 || status === 403) && keyIndex + 1 < GEMINI_KEYS.length) {
+      console.warn(`⚠️ Quota hit on key ${keyIndex + 1}. Trying next key...`);
+      return safeGenerateContent(prompt, keyIndex + 1);
     }
-    console.error("❌ Error from Gemini API:", err.response?.data || err.message);
+
+    // ⏳ Retry on temporary error (503)
+    if (status === 503 && retryCount < 3) {
+      console.warn(`⚠️ Gemini service busy. Retrying in 15s... Attempt ${retryCount + 1}`);
+      await new Promise((res) => setTimeout(res, 15000));
+      return safeGenerateContent(prompt, keyIndex, retryCount + 1);
+    }
+
+    console.error("❌ Gemini API Error:", err.response?.data || err.message);
     throw new Error("Gemini AI generation failed");
   }
 }
 
+// ✅ Gemini Quote & Mood Generator
 class GeminiApi extends QuotesRepository {
   async getDailyQuotes() {
     const prompt = `
@@ -41,8 +59,24 @@ Respond only in this JSON format:
 }
 Return only the JSON. No extra text.
 `;
-    const text = await safeGenerateContent(prompt);
-    return JSON.parse(text);
+
+    try {
+      const text = await safeGenerateContent(prompt);
+      const json = JSON.parse(text);
+
+      if (!json?.morningQuote || !json?.noonQuote || !json?.eveningQuote) {
+        throw new Error("Incomplete quote data from Gemini");
+      }
+
+      return json;
+    } catch (err) {
+      console.warn("⚠️ Fallback to default daily quotes.");
+      return {
+        morningQuote: "Begin your day with a deep breath and a quiet mind.",
+        noonQuote: "Pause, breathe, and let go of tension.",
+        eveningQuote: "Let the day fade with calm and gratitude.",
+      };
+    }
   }
 
   async getAdvicebyMood(mood) {
@@ -55,16 +89,21 @@ Respond only in this JSON format:
 Return only JSON. No extra text.
 `;
 
-    const text = await safeGenerateContent(prompt);
-    const json = JSON.parse(text);
+    try {
+      const text = await safeGenerateContent(prompt);
+      const json = JSON.parse(text);
 
-    // Add a fallback in case Gemini returns bad data
-    if (!json?.text || typeof json.text !== "string") {
-      console.warn("⚠️ Invalid or missing 'text' in Gemini mood message response. Using default fallback.");
-      return { text: "Take a moment to breathe deeply and know that you're not alone." };
+      if (!json?.text || typeof json.text !== "string") {
+        throw new Error("Invalid mood advice response");
+      }
+
+      return json;
+    } catch (err) {
+      console.warn("⚠️ Fallback to default mood message.");
+      return {
+        text: "Take a moment to pause, breathe deeply, and be kind to yourself. You matter.",
+      };
     }
-
-    return json;
   }
 }
 
