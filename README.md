@@ -38,7 +38,6 @@ Used for the Miitra  chatbot. Handles:
 
 API is securely accessed using `.env` variables.
 
-
 ---
 
 ## 🛠️ Tech Stack
